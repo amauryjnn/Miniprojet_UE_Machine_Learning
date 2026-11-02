@@ -25,3 +25,6 @@ __pycache__/
 
 # Logs
 *.log
+
+# pour les tests
+test/
