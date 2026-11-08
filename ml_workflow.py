@@ -7,10 +7,20 @@ import numpy as np
 import pandas as pd
 from imblearn.over_sampling import SMOTE
 from imblearn.under_sampling import RandomUnderSampler
-from sklearn.base import BaseEstimator, ClassifierMixin, clone
+from imblearn.pipeline import Pipeline as ImbPipeline
+
+from sklearn.base import BaseEstimator, ClassifierMixin,TransformerMixin, clone
+from sklearn.impute import SimpleImputer
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import fbeta_score, make_scorer, precision_recall_curve, roc_curve
 from sklearn.model_selection import (FixedThresholdClassifier, TunedThresholdClassifierCV, cross_val_predict, cross_validate)
+from sklearn.preprocessing import FunctionTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import (FixedThresholdClassifier,
+                                     StratifiedKFold, TunedThresholdClassifierCV, cross_val_predict,
+                                     cross_validate, train_test_split)
+
+
 
 
 def read_spambase_names(names_path):
@@ -84,6 +94,126 @@ def variable_types(X, max_ordinal_levels=13):
             types[col] = "continue"
     return pd.Series(types)
 
+def remove_duplicates(df):
+    """Supprime les lignes identiques (rien n'est appris, on peut le faire avant le split)."""
+    return df.drop_duplicates().reset_index(drop=True)
+
+def simulate_missing(X, rate, seed=0):
+    """Efface au hasard une proportion `rate` des valeurs, pour tester l'imputation.
+    """
+    rng = np.random.default_rng(seed)
+    mask = rng.random(X.shape) < rate
+    return X.mask(mask)
+
+class StandardScalerManual(TransformerMixin, BaseEstimator):
+    """Centrée-réduite : z = (x - moyenne) / écart-type, appris sur le train.
+
+    BaseEstimator et TransformerMixin permettent de l'utiliser dans un Pipeline scikit-learn.
+    """
+
+    def fit(self, X, y=None):
+        X = np.asarray(X, dtype=float)
+        self.mean_ = X.mean(axis=0)
+        self.std_ = X.std(axis=0)
+        self.std_[self.std_ == 0] = 1.0 # variable constante : on la centre seulement
+        return self
+
+    def transform(self, X):
+        X = np.asarray(X, dtype=float)
+        return (X - self.mean_) / self.std_
+
+class PCAManual(TransformerMixin, BaseEstimator):
+    """ACP : diagonalisation de la matrice de covariance.
+
+    n_components : nombre d'axes gardés (entier), ou part de variance à garder (réel entre 0 et 1).
+
+    (Ça fonctionne.)
+    """
+
+    def __init__(self, n_components=0.95):
+        self.n_components = n_components
+
+    def fit(self, X, y=None):
+        X = np.asarray(X, dtype=float)
+        self.mean_ = X.mean(axis=0)
+        Xc = X - self.mean_
+        cov = Xc.T @ Xc / (len(X) - 1)
+
+        # eigh : pour une matrice symétrique, valeurs propres rangées par ordre croissant
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        order = np.argsort(eigvals)[::-1]
+        eigvals = np.clip(eigvals[order], 0, None)
+        eigvecs = eigvecs[:, order]
+
+        # un vecteur propre défini au signe près : on rend positive sa plus grande composante
+        for j in range(eigvecs.shape[1]):
+            biggest = np.argmax(np.abs(eigvecs[:, j]))
+            if eigvecs[biggest, j] < 0:
+                eigvecs[:, j] = -eigvecs[:, j]
+
+        ratio = eigvals / eigvals.sum()
+        if self.n_components < 1:
+            # premier nombre d'axes dont la variance cumulée atteint le seuil
+            k = np.argmax(np.cumsum(ratio) >= self.n_components) + 1
+        else:
+            k = self.n_components
+
+        self.n_components_ = int(k)
+        self.components_ = eigvecs[:, :k].T
+        self.explained_variance_ = eigvals[:k]
+        self.explained_variance_ratio_ = ratio[:k]
+        self.all_explained_variance_ratio_ = ratio
+        return self
+
+    def transform(self, X):
+        X = np.asarray(X, dtype=float)
+        return (X - self.mean_) @ self.components_.T
+
+def log1p_transformer():
+    """Transformation x -> log(1 + x), qui écrase les grandes valeurs des variables positives."""
+    return FunctionTransformer(np.log1p, feature_names_out="one-to-one")
+
+
+def build_pipeline(model, impute="median", log_transform=False, scale=True,
+                   selector=None, pca=None, sampler=None):
+    """Assemble le prétraitement et le modèle dans un Pipeline.
+
+    Ordre : imputation, log(1 + x), centrage-réduction, sélection de variables, ACP,
+    rééchantillonnage, modèle. Avec model=None, on obtient le prétraitement seul.
+    """
+    steps = []
+    if impute is not None:
+        steps.append(("impute", SimpleImputer(strategy=impute)))
+    if log_transform:
+        steps.append(("log1p", log1p_transformer()))
+    if scale:
+        steps.append(("scale", StandardScalerManual()))
+    if selector is not None:
+        steps.append(("select", selector))
+    if pca is not None:
+        steps.append(("pca", PCAManual(n_components=pca)))
+    if sampler is not None:
+        steps.append(("sample", sampler))
+    if model is not None:
+        steps.append(("model", model))
+
+    # le Pipeline d'imbalanced-learn rééchantillonne au fit seulement, jamais au predict
+    if sampler is not None:
+        return ImbPipeline(steps)
+    return Pipeline(steps)
+
+def split_data(X, y, test_size=0.2, seed=42):
+    """Séparation train/test stratifiée : même proportion de positifs dans les deux parties."""
+    return train_test_split(X, y, test_size=test_size, stratify=y, random_state=seed)
+
+
+def make_cv(n_splits=5, seed=42):
+    """Validation croisée en k plis, stratifiée et mélangée."""
+    return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+
+
+
+
 class GaussianBayesClassifier(ClassifierMixin, BaseEstimator):
     """Classifieur bayésien gaussien : on suppose X | Y=k ~ N(mu_k, Sigma_k).
 
@@ -151,7 +281,7 @@ class GaussianBayesClassifier(ClassifierMixin, BaseEstimator):
 
     def predict_proba(self, X):
         G = self._discriminant(X)
-        G = G - G.max(axis=1, keepdims=True)     # évite que exp() déborde
+        G = G - G.max(axis=1, keepdims=True) # évite que exp() déborde
         P = np.exp(G)
         return P / P.sum(axis=1, keepdims=True)
 
@@ -184,7 +314,7 @@ class LogisticRegressionGD(ClassifierMixin, BaseEstimator):
         X = np.asarray(X, dtype=float)
         y = np.asarray(y)
         self.classes_ = np.unique(y)
-        t = (y == self.classes_[1]).astype(float)     # cible codée en 0 / 1
+        t = (y == self.classes_[1]).astype(float) # cible codée en 0 / 1
         n, p = X.shape
 
         # poids des exemples
@@ -194,18 +324,18 @@ class LogisticRegressionGD(ClassifierMixin, BaseEstimator):
             s[t == 1] = n / (2 * n_pos)
             s[t == 0] = n / (2 * (n - n_pos))
 
-        lam = 1 / (self.C * n)                        # coefficient de la pénalité L2
-        Xb = np.hstack([X, np.ones((n, 1))])         # colonne de 1 pour le biais b
+        lam = 1 / (self.C * n) # coefficient de la pénalité L2
+        Xb = np.hstack([X, np.ones((n, 1))]) # colonne de 1 pour le biais b
         L = 0.25 * np.linalg.eigvalsh(Xb.T @ (Xb * s[:, None]) / n).max() + lam
         step = 1 / L
 
-        theta = np.zeros(p + 1)                       # theta = (w, b)
-        z = theta.copy()                              # point où l'on calcule le gradient
+        theta = np.zeros(p + 1) # theta = (w, b)
+        z = theta.copy() # point où l'on calcule le gradient
         self.loss_history_ = []
         for it in range(self.max_iter):
             grad = self._gradient(z, Xb, t, s, lam)
             new_theta = z - step * grad
-            z = new_theta + it / (it + 3) * (new_theta - theta)    # élan de Nesterov
+            z = new_theta + it / (it + 3) * (new_theta - theta) # élan de Nesterov
             theta = new_theta
             if it % 10 == 0:
                 self.loss_history_.append(self._loss(theta, Xb, t, s, lam))
@@ -221,7 +351,7 @@ class LogisticRegressionGD(ClassifierMixin, BaseEstimator):
         prob = sigmoid(Xb @ theta)
         grad = Xb.T @ (s * (prob - t)) / len(t)
         penalty = lam * theta
-        penalty[-1] = 0                               # le biais n'est pas pénalisé
+        penalty[-1] = 0 # le biais n'est pas pénalisé
         return grad + penalty
 
     def _loss(self, theta, Xb, t, s, lam):
@@ -326,7 +456,7 @@ def synthetic_vs_real_auc(X_train, y_train, sampler, n_max=20000, seed=42):
     Z = StandardScalerManual().fit_transform(X_train)
     y = np.asarray(y_train)
     Z_resampled, _ = sampler.fit_resample(Z, y)
-    synthetic = Z_resampled[len(Z):]         # imbalanced-learn ajoute les points créés à la fin
+    synthetic = Z_resampled[len(Z):] # imbalanced-learn ajoute les points créés à la fin
     real = Z[y == 1]
 
     n = min(n_max, len(real), len(synthetic))
