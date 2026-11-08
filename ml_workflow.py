@@ -17,9 +17,17 @@ from sklearn.metrics import (average_precision_score, fbeta_score, make_scorer,
 from sklearn.model_selection import (FixedThresholdClassifier, TunedThresholdClassifierCV, cross_val_predict, cross_validate)
 from sklearn.preprocessing import FunctionTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.model_selection import (FixedThresholdClassifier,
-                                     StratifiedKFold, TunedThresholdClassifierCV, cross_val_predict,
-                                     cross_validate, train_test_split)
+from sklearn.model_selection import (StratifiedKFold, train_test_split)
+
+from sklearn.dummy import DummyClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+from sklearn.naive_bayes import GaussianNB
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
+
 
 
 
@@ -371,6 +379,114 @@ class LogisticRegressionGD(ClassifierMixin, BaseEstimator):
     def predict(self, X):
         return self.classes_[(self.decision_function(X) > 0).astype(int)]
 
+
+# 4b. CATALOGUE DE MODÈLES, VALIDATION CROISÉE, RÉGLAGE  
+def get_models(seed=42, class_weight=None):
+    """Classifieurs comparés, avec des hyperparamètres de départ raisonnables.
+
+    class_weight="balanced" est transmis aux modèles qui l'acceptent (jeu déséquilibré).
+    """
+    models = {
+        "Dummy (classe majoritaire)": DummyClassifier(strategy="most_frequent"),
+        "Régression logistique": LogisticRegressionGD(C=1.0, class_weight=class_weight),
+        "LDA": GaussianBayesClassifier(covariance="shared", reg=1e-3),
+        "QDA": GaussianBayesClassifier(covariance="full", reg=1e-1),
+        "Bayes naïf gaussien": GaussianNB(),
+        "kNN": KNeighborsClassifier(n_neighbors=15, weights="distance"),
+        "SVM RBF": SVC(C=1.0, gamma="scale", class_weight=class_weight, random_state=seed),
+        "Arbre de décision": DecisionTreeClassifier(max_depth=8, min_samples_leaf=20,
+                                                    class_weight=class_weight, random_state=seed),
+        "Random Forest": RandomForestClassifier(n_estimators=200, min_samples_leaf=2, max_features="sqrt",
+                                                class_weight=class_weight, n_jobs=-1, random_state=seed),
+        "Gradient Boosting (hist.)": HistGradientBoostingClassifier(max_iter=300, learning_rate=0.1,
+                                                                     early_stopping=True,
+                                                                     class_weight=class_weight,
+                                                                     random_state=seed),
+        "MLP (1 couche cachée)": MLPClassifier(hidden_layer_sizes=(64,), alpha=1e-3, early_stopping=True,
+                                               max_iter=500, random_state=seed),
+    }
+    return models
+
+def cross_validate_models(models, X, y, scoring, cv, n_jobs=-1, verbose=True):
+    """Validation croisée de chaque modèle : moyenne et écart-type de chaque métrique.
+
+    La première métrique de `scoring` est la métrique principale : on donne aussi son score
+    sur le train (pour repérer le sur-apprentissage) et on trie le tableau selon elle.
+    """
+    main = list(scoring)[0]
+    rows = []
+    for name, model in models.items():
+        start = time.perf_counter()
+        res = cross_validate(model, X, y, scoring=scoring, cv=cv, n_jobs=n_jobs,
+                             return_train_score=True, error_score="raise")
+        row = {"modele": name}
+        for metric in scoring:
+            row[metric + "_moy"] = res["test_" + metric].mean()
+            row[metric + "_std"] = res["test_" + metric].std()
+        row[main + "_train"] = res["train_" + main].mean()
+        row["temps_fit_s"] = res["fit_time"].mean()
+        row["temps_predict_s"] = res["score_time"].mean()
+        rows.append(row)
+        if verbose:
+            duration = time.perf_counter() - start
+            print(f"{name:42s} {main} = {row[main + '_moy']:.4f} ± {row[main + '_std']:.4f}   ({duration:.1f} s)")
+    table = pd.DataFrame(rows).set_index("modele")
+    return table.sort_values(main + "_moy", ascending=False)
+
+def tune_model(pipeline, param_grid, X, y, scoring, cv, n_iter=None, seed=42):
+    """Réglage des hyperparamètres par validation croisée sur le train.
+
+    Grille complète si n_iter vaut None, sinon n_iter combinaisons tirées au hasard.
+    Renvoie le meilleur pipeline (réentraîné sur tout X) et le tableau des scores.
+    """
+    if n_iter is None:
+        search = GridSearchCV(pipeline, param_grid, scoring=scoring, cv=cv, n_jobs=-1)
+    else:
+        search = RandomizedSearchCV(pipeline, param_grid, n_iter=n_iter, scoring=scoring, cv=cv,
+                                    n_jobs=-1, random_state=seed)
+    search.fit(X, y)
+
+    results = pd.DataFrame(search.cv_results_)
+    param_cols = [c for c in results.columns if c.startswith("param_")]
+    results = results[param_cols + ["mean_test_score", "std_test_score"]]
+    results = results.sort_values("mean_test_score", ascending=False).reset_index(drop=True)
+    # « param_model__C » devient « C », pour que ce soit plus lisible
+    results.columns = [c.replace("param_", "").replace("model__", "") for c in results.columns]
+    return search.best_estimator_, results
+
+def fit_time_scaling(models, X, y, sizes, seed=0):
+    """Temps d'entraînement et de prédiction (sur 5 000 points) selon la taille du train."""
+    rng = np.random.default_rng(seed)
+    X = np.asarray(X)
+    y = np.asarray(y)
+    X_eval = X[rng.choice(len(X), 5000, replace=False)]
+    rows = []
+    for n in sizes:
+        idx = rng.choice(len(X), n, replace=False)
+        for name, model in models.items():
+            model = clone(model)
+            t0 = time.perf_counter()
+            model.fit(X[idx], y[idx])
+            t1 = time.perf_counter()
+            model.predict(X_eval)
+            t2 = time.perf_counter()
+            rows.append({"n_train": n, "modele": name, "fit_s": t1 - t0, "predict_5000_s": t2 - t1})
+    return pd.DataFrame(rows)
+
+def tpr_at_fpr(y_true, y_score, max_fpr=0.01):
+    """Meilleur rappel possible quand le taux de faux positifs doit rester <= max_fpr."""
+    fpr, tpr, _ = roc_curve(y_true, y_score)
+    allowed = fpr <= max_fpr
+    if not allowed.any():
+        return 0.0
+    return tpr[allowed].max()
+
+def tpr_at_fpr_scorer(max_fpr=0.01):
+    """tpr_at_fpr sous forme de scorer, utilisable dans cross_validate ou GridSearchCV."""
+    return make_scorer(tpr_at_fpr, response_method=("predict_proba", "decision_function"), max_fpr=max_fpr)
+
+    
+
 # ------------------------------------------------------------------------
 # Seuils de décision
 
@@ -621,3 +737,4 @@ def plot_confusion(metrics, labels=("0", "1"), normalize=False, ax=None, title="
     ax.set_yticks([0, 1], ["réel " + labels[0], "réel " + labels[1]])
     ax.set_title(title)
     return ax
+
