@@ -12,13 +12,22 @@ from imblearn.pipeline import Pipeline as ImbPipeline
 from sklearn.base import BaseEstimator, ClassifierMixin,TransformerMixin, clone
 from sklearn.impute import SimpleImputer
 from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.metrics import fbeta_score, make_scorer, precision_recall_curve, roc_curve
+from sklearn.metrics import (average_precision_score, fbeta_score, make_scorer,
+                             precision_recall_curve, roc_auc_score, roc_curve)
 from sklearn.model_selection import (FixedThresholdClassifier, TunedThresholdClassifierCV, cross_val_predict, cross_validate)
 from sklearn.preprocessing import FunctionTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.model_selection import (FixedThresholdClassifier,
-                                     StratifiedKFold, TunedThresholdClassifierCV, cross_val_predict,
-                                     cross_validate, train_test_split)
+from sklearn.model_selection import (StratifiedKFold, train_test_split)
+
+from sklearn.dummy import DummyClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+from sklearn.naive_bayes import GaussianNB
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
+
 
 
 
@@ -370,6 +379,114 @@ class LogisticRegressionGD(ClassifierMixin, BaseEstimator):
     def predict(self, X):
         return self.classes_[(self.decision_function(X) > 0).astype(int)]
 
+
+# 4b. CATALOGUE DE MODÈLES, VALIDATION CROISÉE, RÉGLAGE  
+def get_models(seed=42, class_weight=None):
+    """Classifieurs comparés, avec des hyperparamètres de départ raisonnables.
+
+    class_weight="balanced" est transmis aux modèles qui l'acceptent (jeu déséquilibré).
+    """
+    models = {
+        "Dummy (classe majoritaire)": DummyClassifier(strategy="most_frequent"),
+        "Régression logistique": LogisticRegressionGD(C=1.0, class_weight=class_weight),
+        "LDA": GaussianBayesClassifier(covariance="shared", reg=1e-3),
+        "QDA": GaussianBayesClassifier(covariance="full", reg=1e-1),
+        "Bayes naïf gaussien": GaussianNB(),
+        "kNN": KNeighborsClassifier(n_neighbors=15, weights="distance"),
+        "SVM RBF": SVC(C=1.0, gamma="scale", class_weight=class_weight, random_state=seed),
+        "Arbre de décision": DecisionTreeClassifier(max_depth=8, min_samples_leaf=20,
+                                                    class_weight=class_weight, random_state=seed),
+        "Random Forest": RandomForestClassifier(n_estimators=200, min_samples_leaf=2, max_features="sqrt",
+                                                class_weight=class_weight, n_jobs=-1, random_state=seed),
+        "Gradient Boosting (hist.)": HistGradientBoostingClassifier(max_iter=300, learning_rate=0.1,
+                                                                     early_stopping=True,
+                                                                     class_weight=class_weight,
+                                                                     random_state=seed),
+        "MLP (1 couche cachée)": MLPClassifier(hidden_layer_sizes=(64,), alpha=1e-3, early_stopping=True,
+                                               max_iter=500, random_state=seed),
+    }
+    return models
+
+def cross_validate_models(models, X, y, scoring, cv, n_jobs=-1, verbose=True):
+    """Validation croisée de chaque modèle : moyenne et écart-type de chaque métrique.
+
+    La première métrique de `scoring` est la métrique principale : on donne aussi son score
+    sur le train (pour repérer le sur-apprentissage) et on trie le tableau selon elle.
+    """
+    main = list(scoring)[0]
+    rows = []
+    for name, model in models.items():
+        start = time.perf_counter()
+        res = cross_validate(model, X, y, scoring=scoring, cv=cv, n_jobs=n_jobs,
+                             return_train_score=True, error_score="raise")
+        row = {"modele": name}
+        for metric in scoring:
+            row[metric + "_moy"] = res["test_" + metric].mean()
+            row[metric + "_std"] = res["test_" + metric].std()
+        row[main + "_train"] = res["train_" + main].mean()
+        row["temps_fit_s"] = res["fit_time"].mean()
+        row["temps_predict_s"] = res["score_time"].mean()
+        rows.append(row)
+        if verbose:
+            duration = time.perf_counter() - start
+            print(f"{name:42s} {main} = {row[main + '_moy']:.4f} ± {row[main + '_std']:.4f}   ({duration:.1f} s)")
+    table = pd.DataFrame(rows).set_index("modele")
+    return table.sort_values(main + "_moy", ascending=False)
+
+def tune_model(pipeline, param_grid, X, y, scoring, cv, n_iter=None, seed=42):
+    """Réglage des hyperparamètres par validation croisée sur le train.
+
+    Grille complète si n_iter vaut None, sinon n_iter combinaisons tirées au hasard.
+    Renvoie le meilleur pipeline (réentraîné sur tout X) et le tableau des scores.
+    """
+    if n_iter is None:
+        search = GridSearchCV(pipeline, param_grid, scoring=scoring, cv=cv, n_jobs=-1)
+    else:
+        search = RandomizedSearchCV(pipeline, param_grid, n_iter=n_iter, scoring=scoring, cv=cv,
+                                    n_jobs=-1, random_state=seed)
+    search.fit(X, y)
+
+    results = pd.DataFrame(search.cv_results_)
+    param_cols = [c for c in results.columns if c.startswith("param_")]
+    results = results[param_cols + ["mean_test_score", "std_test_score"]]
+    results = results.sort_values("mean_test_score", ascending=False).reset_index(drop=True)
+    # « param_model__C » devient « C », pour que ce soit plus lisible
+    results.columns = [c.replace("param_", "").replace("model__", "") for c in results.columns]
+    return search.best_estimator_, results
+
+def fit_time_scaling(models, X, y, sizes, seed=0):
+    """Temps d'entraînement et de prédiction (sur 5 000 points) selon la taille du train."""
+    rng = np.random.default_rng(seed)
+    X = np.asarray(X)
+    y = np.asarray(y)
+    X_eval = X[rng.choice(len(X), 5000, replace=False)]
+    rows = []
+    for n in sizes:
+        idx = rng.choice(len(X), n, replace=False)
+        for name, model in models.items():
+            model = clone(model)
+            t0 = time.perf_counter()
+            model.fit(X[idx], y[idx])
+            t1 = time.perf_counter()
+            model.predict(X_eval)
+            t2 = time.perf_counter()
+            rows.append({"n_train": n, "modele": name, "fit_s": t1 - t0, "predict_5000_s": t2 - t1})
+    return pd.DataFrame(rows)
+
+def tpr_at_fpr(y_true, y_score, max_fpr=0.01):
+    """Meilleur rappel possible quand le taux de faux positifs doit rester <= max_fpr."""
+    fpr, tpr, _ = roc_curve(y_true, y_score)
+    allowed = fpr <= max_fpr
+    if not allowed.any():
+        return 0.0
+    return tpr[allowed].max()
+
+def tpr_at_fpr_scorer(max_fpr=0.01):
+    """tpr_at_fpr sous forme de scorer, utilisable dans cross_validate ou GridSearchCV."""
+    return make_scorer(tpr_at_fpr, response_method=("predict_proba", "decision_function"), max_fpr=max_fpr)
+
+    
+
 # ------------------------------------------------------------------------
 # Seuils de décision
 
@@ -469,3 +586,155 @@ def synthetic_vs_real_auc(X_train, y_train, sampler, n_max=20000, seed=42):
     clf = HistGradientBoostingClassifier(max_iter=100, random_state=seed)
     res = cross_validate(clf, A, is_synthetic, cv=make_cv(3, seed), scoring="roc_auc")
     return res["test_score"].mean()
+
+
+# --------------------------------------------------------------------------------------
+# Metrics et Évals
+
+def confusion_counts(y_true, y_pred):
+    """Matrice de confusion binaire  : (VN, FP, FN, VP)."""
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    tn = np.sum((y_true == 0) & (y_pred == 0))
+    fp = np.sum((y_true == 0) & (y_pred == 1))
+    fn = np.sum((y_true == 1) & (y_pred == 0))
+    tp = np.sum((y_true == 1) & (y_pred == 1))
+    return int(tn), int(fp), int(fn), int(tp)
+
+def divide(a, b):
+    """a / b, ou 0 si b = 0 (par exemple une précision quand le modèle ne prédit aucun positif)."""
+    if b == 0:
+        return 0.0
+    return a / b
+
+def compute_metrics(y_true, y_pred, y_score=None, beta=1.0):
+    """Métriques de classification binaire calculées à partir de la matrice de confusion.
+
+    Si les scores y_score sont donnés, on ajoute l'AUC-ROC et l'AUC-PR (qui ne dépendent pas du seuil).
+    """
+    tn, fp, fn, tp = confusion_counts(y_true, y_pred)
+    precision = divide(tp, tp + fp)
+    recall = divide(tp, tp + fn)
+    specificity = divide(tn, tn + fp)
+    metrics = {
+        "accuracy": divide(tp + tn, tn + fp + fn + tp),
+        "precision": precision,
+        "rappel": recall,
+        "specificite": specificity,
+        "taux_faux_positifs": 1 - specificity,
+        "f1": divide(2 * precision * recall, precision + recall),
+        f"f{beta:g}": divide((1 + beta**2) * precision * recall, beta**2 * precision + recall),
+        "accuracy_equilibree": (recall + specificity) / 2,
+        "VN": tn, "FP": fp, "FN": fn, "VP": tp,
+    }
+    if y_score is not None:
+        metrics["auc_roc"] = roc_auc_score(y_true, y_score)
+        metrics["auc_pr"] = average_precision_score(y_true, y_score)
+    return metrics
+
+def get_scores(model, X):
+    """Score continu du modèle : probabilité de la classe 1, ou decision_function à défaut (SVM)."""
+    if hasattr(model, "predict_proba"):
+        return model.predict_proba(X)[:, 1]
+    return model.decision_function(X)
+
+
+def evaluate_on_test(model, X_test, y_test, threshold=None, beta=1.0):
+    """Évaluation finale d'un modèle déjà entraîné, au seuil donné (par défaut : model.predict)."""
+    scores = get_scores(model, X_test)
+    if threshold is None:
+        y_pred = model.predict(X_test)
+    else:
+        y_pred = (scores >= threshold).astype(int)
+    return compute_metrics(y_test, y_pred, scores, beta=beta)
+
+
+def results_table(results, cols):
+    """Transforme un dictionnaire {nom: métriques} en tableau, en gardant les colonnes cols."""
+    return pd.DataFrame(results).T[list(cols)]
+
+
+def missing_values_experiment(make_model, X_train, y_train, X_test, y_test, rates=(0.0, 0.1, 0.3), seed=0):
+    """Compare l'imputation par la moyenne et par la médiane quand on efface des valeurs.
+
+    make_model(strategy) renvoie un pipeline dont l'imputation utilise strategy ("mean" ou "median").
+    On mesure l'AUC-ROC sur le test.
+    """
+    rows = []
+    for rate in rates:
+        X_tr = simulate_missing(X_train, rate, seed)
+        X_te = simulate_missing(X_test, rate, seed + 1)
+        for strategy in ["mean", "median"]:
+            model = make_model(strategy).fit(X_tr, y_train)
+            auc = roc_auc_score(y_test, get_scores(model, X_te))
+            rows.append({"taux_manquant": rate, "imputation": strategy, "auc_roc_test": auc})
+    table = pd.DataFrame(rows)
+    return table.pivot(index="taux_manquant", columns="imputation", values="auc_roc_test")
+
+# --------------------------------------------------------------------------------------
+# Les plots
+
+def plot_class_balance(y, labels=("0", "1"), ax=None):
+    """Diagramme en barres du nombre d'individus de chaque classe."""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(4, 3))
+    counts = pd.Series(y).value_counts().sort_index()
+    bars = ax.bar(labels, counts.values, color=["#4C72B0", "#DD8452"])
+    for bar, count in zip(bars, counts.values):
+        x = bar.get_x() + bar.get_width() / 2
+        ax.text(x, count, f"{count}\n({count / counts.sum():.1%})", ha="center", va="bottom")
+    ax.set_ylabel("effectif")
+    ax.set_ylim(0, counts.max() * 1.25)
+    ax.set_title("Répartition des classes")
+    return ax
+
+def plot_pca_variance(pca, threshold=0.95, ax=None):
+    """Variance expliquée par axe (barres) et cumulée (courbe), pour choisir le nombre d'axes."""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(7, 3.5))
+    ratio = pca.all_explained_variance_ratio_
+    cumulated = np.cumsum(ratio)
+    axes_numbers = np.arange(1, len(ratio) + 1)
+    k = np.argmax(cumulated >= threshold) + 1
+    ax.bar(axes_numbers, ratio, alpha=0.6, label="par axe")
+    ax.plot(axes_numbers, cumulated, "o-", ms=3, color="C1", label="cumulée")
+    ax.axhline(threshold, ls="--", color="grey")
+    ax.axvline(k, ls=":", color="grey")
+    ax.set_title(f"ACP : {k} axes pour {threshold:.0%} de la variance")
+    ax.set_xlabel("composante")
+    ax.set_ylabel("part de variance")
+    ax.legend()
+    return ax
+
+def plot_pca_2d(Z, y, labels=("0", "1"), max_points=4000, seed=0, ax=None):
+    """Individus projetés sur les deux premiers axes de l'ACP, colorés par classe."""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(5, 4))
+    y = np.asarray(y)
+    idx = np.random.default_rng(seed).choice(len(Z), min(max_points, len(Z)), replace=False)
+    Z, y = Z[idx], y[idx]
+    for c, label in zip([0, 1], labels):
+        ax.scatter(Z[y == c, 0], Z[y == c, 1], s=4, alpha=0.4, label=label)
+    ax.set_xlabel("PC1")
+    ax.set_ylabel("PC2")
+    ax.legend(markerscale=3)
+    ax.set_title("Projection sur les 2 premiers axes")
+    return ax
+
+def plot_confusion(metrics, labels=("0", "1"), normalize=False, ax=None, title=""):
+    """Matrice de confusion dessinée à partir des comptes VN, FP, FN, VP de compute_metrics."""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(3.6, 3.2))
+    cm = np.array([[metrics["VN"], metrics["FP"]], [metrics["FN"], metrics["VP"]]], dtype=float)
+    shown = cm / cm.sum(axis=1, keepdims=True) if normalize else cm
+    ax.imshow(shown, cmap="Blues")
+    for i in range(2):
+        for j in range(2):
+            text = f"{shown[i, j]:.1%}\n({int(cm[i, j])})" if normalize else str(int(cm[i, j]))
+            color = "white" if shown[i, j] > shown.max() / 2 else "black"
+            ax.text(j, i, text, ha="center", va="center", color=color)
+    ax.set_xticks([0, 1], ["prédit " + labels[0], "prédit " + labels[1]])
+    ax.set_yticks([0, 1], ["réel " + labels[0], "réel " + labels[1]])
+    ax.set_title(title)
+    return ax
+
