@@ -27,6 +27,11 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.svm import SVC
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.calibration import calibration_curve
+from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif
+from sklearn.inspection import permutation_importance
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import learning_curve, validation_curve
 
 
 
@@ -736,5 +741,71 @@ def plot_confusion(metrics, labels=("0", "1"), normalize=False, ax=None, title="
     ax.set_xticks([0, 1], ["prédit " + labels[0], "prédit " + labels[1]])
     ax.set_yticks([0, 1], ["réel " + labels[0], "réel " + labels[1]])
     ax.set_title(title)
+    return ax
+
+
+def plot_feature_ranking(ranking, top=20, ax=None):
+    """Carte des rangs de chaque variable selon les 4 critères de rank_features."""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(6, 0.3 * top + 1))
+    criteria = ["anova_F", "info_mutuelle", "abs_coef_L1", "permutation_RF"]
+    ranks = ranking.head(top)[["rang_" + c for c in criteria]]
+    image = ax.imshow(ranks.values, cmap="viridis_r", aspect="auto")
+    ax.set_yticks(range(len(ranks)), ranks.index)
+    ax.set_xticks(range(len(criteria)), criteria, rotation=30, ha="right")
+    for i in range(ranks.shape[0]):
+        for j in range(ranks.shape[1]):
+            ax.text(j, i, ranks.values[i, j], ha="center", va="center", color="w", fontsize=7)
+    plt.colorbar(image, ax=ax, label="rang (1 = meilleure)")
+    ax.set_title("Classement des variables selon 4 critères")
+    return ax
+
+
+def plot_score_vs_k(df, metric_name, ax=None, label=None):
+    """Score de validation croisée (± 1 écart-type) selon le nombre de variables gardées."""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(6, 3.5))
+    ax.errorbar(df["k"], df["score_moyen"], yerr=df["ecart_type"], marker="o", ms=3, capsize=2, label=label)
+    ax.set_xlabel("nombre de variables gardées k")
+    ax.set_ylabel(metric_name)
+    ax.set_title(f"{metric_name} (CV) en fonction de k")
+    ax.grid(alpha=0.3)
+    return ax
+
+
+def plot_threshold_tradeoff(y_true, y_score, thresholds, ax=None):
+    """Précision, rappel et taux de faux positifs selon le seuil ; thresholds = {nom: seuil} à marquer."""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(7, 3.5))
+    precision, recall, thr = precision_recall_curve(y_true, y_score)
+    ax.plot(thr, precision[:-1], label="précision")
+    ax.plot(thr, recall[:-1], label="rappel")
+    fpr, _, thr_roc = roc_curve(y_true, y_score)
+    ax.plot(thr_roc[1:], fpr[1:], label="taux de faux positifs")    # le 1er seuil de roc_curve est infini
+    for i, (name, t) in enumerate(thresholds.items()):
+        ax.axvline(t, ls="--", color=f"C{i + 3}", label=f"{name} = {t:.3f}")
+    ax.set_xlabel("seuil sur le score")
+    ax.set_xlim(0, 1)
+    ax.legend(fontsize=7)
+    ax.grid(alpha=0.3)
+    ax.set_title("Compromis précision / rappel selon le seuil")
+    return ax
+
+
+def plot_calibration(scores, y_true, n_bins=10, ax=None):
+    """Fréquence réelle de la classe 1 en fonction de la probabilité prédite.
+
+    Le seuil bayésien n'a de sens que si les probabilités sont calibrées (courbe proche de la diagonale).
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(4.5, 4))
+    for name, s in scores.items():
+        observed, predicted = calibration_curve(y_true, s, n_bins=n_bins, strategy="quantile")
+        ax.plot(predicted, observed, "o-", ms=3, label=name)
+    ax.plot([0, 1], [0, 1], "k--", lw=0.8)
+    ax.set_xlabel("probabilité prédite")
+    ax.set_ylabel("fréquence observée")
+    ax.set_title("Calibration des probabilités")
+    ax.legend(fontsize=7)
     return ax
 
