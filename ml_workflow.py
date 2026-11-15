@@ -12,7 +12,8 @@ from imblearn.pipeline import Pipeline as ImbPipeline
 from sklearn.base import BaseEstimator, ClassifierMixin,TransformerMixin, clone
 from sklearn.impute import SimpleImputer
 from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.metrics import fbeta_score, make_scorer, precision_recall_curve, roc_curve
+from sklearn.metrics import (average_precision_score, fbeta_score, make_scorer,
+                             precision_recall_curve, roc_auc_score, roc_curve)
 from sklearn.model_selection import (FixedThresholdClassifier, TunedThresholdClassifierCV, cross_val_predict, cross_validate)
 from sklearn.preprocessing import FunctionTransformer
 from sklearn.pipeline import Pipeline
@@ -469,3 +470,154 @@ def synthetic_vs_real_auc(X_train, y_train, sampler, n_max=20000, seed=42):
     clf = HistGradientBoostingClassifier(max_iter=100, random_state=seed)
     res = cross_validate(clf, A, is_synthetic, cv=make_cv(3, seed), scoring="roc_auc")
     return res["test_score"].mean()
+
+
+# --------------------------------------------------------------------------------------
+# Metrics et Évals
+
+def confusion_counts(y_true, y_pred):
+    """Matrice de confusion binaire  : (VN, FP, FN, VP)."""
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    tn = np.sum((y_true == 0) & (y_pred == 0))
+    fp = np.sum((y_true == 0) & (y_pred == 1))
+    fn = np.sum((y_true == 1) & (y_pred == 0))
+    tp = np.sum((y_true == 1) & (y_pred == 1))
+    return int(tn), int(fp), int(fn), int(tp)
+
+def divide(a, b):
+    """a / b, ou 0 si b = 0 (par exemple une précision quand le modèle ne prédit aucun positif)."""
+    if b == 0:
+        return 0.0
+    return a / b
+
+def compute_metrics(y_true, y_pred, y_score=None, beta=1.0):
+    """Métriques de classification binaire calculées à partir de la matrice de confusion.
+
+    Si les scores y_score sont donnés, on ajoute l'AUC-ROC et l'AUC-PR (qui ne dépendent pas du seuil).
+    """
+    tn, fp, fn, tp = confusion_counts(y_true, y_pred)
+    precision = divide(tp, tp + fp)
+    recall = divide(tp, tp + fn)
+    specificity = divide(tn, tn + fp)
+    metrics = {
+        "accuracy": divide(tp + tn, tn + fp + fn + tp),
+        "precision": precision,
+        "rappel": recall,
+        "specificite": specificity,
+        "taux_faux_positifs": 1 - specificity,
+        "f1": divide(2 * precision * recall, precision + recall),
+        f"f{beta:g}": divide((1 + beta**2) * precision * recall, beta**2 * precision + recall),
+        "accuracy_equilibree": (recall + specificity) / 2,
+        "VN": tn, "FP": fp, "FN": fn, "VP": tp,
+    }
+    if y_score is not None:
+        metrics["auc_roc"] = roc_auc_score(y_true, y_score)
+        metrics["auc_pr"] = average_precision_score(y_true, y_score)
+    return metrics
+
+def get_scores(model, X):
+    """Score continu du modèle : probabilité de la classe 1, ou decision_function à défaut (SVM)."""
+    if hasattr(model, "predict_proba"):
+        return model.predict_proba(X)[:, 1]
+    return model.decision_function(X)
+
+
+def evaluate_on_test(model, X_test, y_test, threshold=None, beta=1.0):
+    """Évaluation finale d'un modèle déjà entraîné, au seuil donné (par défaut : model.predict)."""
+    scores = get_scores(model, X_test)
+    if threshold is None:
+        y_pred = model.predict(X_test)
+    else:
+        y_pred = (scores >= threshold).astype(int)
+    return compute_metrics(y_test, y_pred, scores, beta=beta)
+
+
+def results_table(results, cols):
+    """Transforme un dictionnaire {nom: métriques} en tableau, en gardant les colonnes cols."""
+    return pd.DataFrame(results).T[list(cols)]
+
+
+def missing_values_experiment(make_model, X_train, y_train, X_test, y_test, rates=(0.0, 0.1, 0.3), seed=0):
+    """Compare l'imputation par la moyenne et par la médiane quand on efface des valeurs.
+
+    make_model(strategy) renvoie un pipeline dont l'imputation utilise strategy ("mean" ou "median").
+    On mesure l'AUC-ROC sur le test.
+    """
+    rows = []
+    for rate in rates:
+        X_tr = simulate_missing(X_train, rate, seed)
+        X_te = simulate_missing(X_test, rate, seed + 1)
+        for strategy in ["mean", "median"]:
+            model = make_model(strategy).fit(X_tr, y_train)
+            auc = roc_auc_score(y_test, get_scores(model, X_te))
+            rows.append({"taux_manquant": rate, "imputation": strategy, "auc_roc_test": auc})
+    table = pd.DataFrame(rows)
+    return table.pivot(index="taux_manquant", columns="imputation", values="auc_roc_test")
+
+# --------------------------------------------------------------------------------------
+# Les plots
+
+def plot_class_balance(y, labels=("0", "1"), ax=None):
+    """Diagramme en barres du nombre d'individus de chaque classe."""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(4, 3))
+    counts = pd.Series(y).value_counts().sort_index()
+    bars = ax.bar(labels, counts.values, color=["#4C72B0", "#DD8452"])
+    for bar, count in zip(bars, counts.values):
+        x = bar.get_x() + bar.get_width() / 2
+        ax.text(x, count, f"{count}\n({count / counts.sum():.1%})", ha="center", va="bottom")
+    ax.set_ylabel("effectif")
+    ax.set_ylim(0, counts.max() * 1.25)
+    ax.set_title("Répartition des classes")
+    return ax
+
+def plot_pca_variance(pca, threshold=0.95, ax=None):
+    """Variance expliquée par axe (barres) et cumulée (courbe), pour choisir le nombre d'axes."""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(7, 3.5))
+    ratio = pca.all_explained_variance_ratio_
+    cumulated = np.cumsum(ratio)
+    axes_numbers = np.arange(1, len(ratio) + 1)
+    k = np.argmax(cumulated >= threshold) + 1
+    ax.bar(axes_numbers, ratio, alpha=0.6, label="par axe")
+    ax.plot(axes_numbers, cumulated, "o-", ms=3, color="C1", label="cumulée")
+    ax.axhline(threshold, ls="--", color="grey")
+    ax.axvline(k, ls=":", color="grey")
+    ax.set_title(f"ACP : {k} axes pour {threshold:.0%} de la variance")
+    ax.set_xlabel("composante")
+    ax.set_ylabel("part de variance")
+    ax.legend()
+    return ax
+
+def plot_pca_2d(Z, y, labels=("0", "1"), max_points=4000, seed=0, ax=None):
+    """Individus projetés sur les deux premiers axes de l'ACP, colorés par classe."""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(5, 4))
+    y = np.asarray(y)
+    idx = np.random.default_rng(seed).choice(len(Z), min(max_points, len(Z)), replace=False)
+    Z, y = Z[idx], y[idx]
+    for c, label in zip([0, 1], labels):
+        ax.scatter(Z[y == c, 0], Z[y == c, 1], s=4, alpha=0.4, label=label)
+    ax.set_xlabel("PC1")
+    ax.set_ylabel("PC2")
+    ax.legend(markerscale=3)
+    ax.set_title("Projection sur les 2 premiers axes")
+    return ax
+
+def plot_confusion(metrics, labels=("0", "1"), normalize=False, ax=None, title=""):
+    """Matrice de confusion dessinée à partir des comptes VN, FP, FN, VP de compute_metrics."""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(3.6, 3.2))
+    cm = np.array([[metrics["VN"], metrics["FP"]], [metrics["FN"], metrics["VP"]]], dtype=float)
+    shown = cm / cm.sum(axis=1, keepdims=True) if normalize else cm
+    ax.imshow(shown, cmap="Blues")
+    for i in range(2):
+        for j in range(2):
+            text = f"{shown[i, j]:.1%}\n({int(cm[i, j])})" if normalize else str(int(cm[i, j]))
+            color = "white" if shown[i, j] > shown.max() / 2 else "black"
+            ax.text(j, i, text, ha="center", va="center", color=color)
+    ax.set_xticks([0, 1], ["prédit " + labels[0], "prédit " + labels[1]])
+    ax.set_yticks([0, 1], ["réel " + labels[0], "réel " + labels[1]])
+    ax.set_title(title)
+    return ax
