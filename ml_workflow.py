@@ -781,7 +781,7 @@ def plot_threshold_tradeoff(y_true, y_score, thresholds, ax=None):
     ax.plot(thr, precision[:-1], label="précision")
     ax.plot(thr, recall[:-1], label="rappel")
     fpr, _, thr_roc = roc_curve(y_true, y_score)
-    ax.plot(thr_roc[1:], fpr[1:], label="taux de faux positifs")    # le 1er seuil de roc_curve est infini
+    ax.plot(thr_roc[1:], fpr[1:], label="taux de faux positifs") # le 1er seuil de roc_curve est infini
     for i, (name, t) in enumerate(thresholds.items()):
         ax.axvline(t, ls="--", color=f"C{i + 3}", label=f"{name} = {t:.3f}")
     ax.set_xlabel("seuil sur le score")
