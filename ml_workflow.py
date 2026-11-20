@@ -490,6 +490,81 @@ def tpr_at_fpr_scorer(max_fpr=0.01):
     """tpr_at_fpr sous forme de scorer, utilisable dans cross_validate ou GridSearchCV."""
     return make_scorer(tpr_at_fpr, response_method=("predict_proba", "decision_function"), max_fpr=max_fpr)
 
+def rank_features(X, y, seed=42, n_perm_samples=20000, n_repeats=5):
+    """Classe les variables selon 4 critères (rang 1 = la meilleure).
+
+    - ANOVA F : écart entre les moyennes des deux classes ;
+    - information mutuelle : dépendance quelconque, même non linéaire ;
+    - L1 : |coefficient| d'une régression logistique pénalisée L1 (0 = variable écartée) ;
+    - permutation : perte d'AUC d'une forêt aléatoire quand on mélange la variable.
+    """
+    y = np.asarray(y)
+    # sur Diabetes (200 000 lignes) on travaille sur un sous-échantillon pour aller vite
+    if len(X) > n_perm_samples:
+        idx = np.random.default_rng(seed).choice(len(X), n_perm_samples, replace=False)
+        X, y = X.iloc[idx], y[idx]
+
+    scores = pd.DataFrame(index=X.columns)
+    scores["anova_F"] = f_classif(X, y)[0]
+    scores["info_mutuelle"] = mutual_info_classif(X, y, random_state=seed)
+
+    Z = StandardScalerManual().fit_transform(X)
+    l1_model = LogisticRegression(penalty="l1", C=0.05, solver="liblinear", max_iter=2000, random_state=seed)
+    l1_model.fit(Z, y)
+    scores["abs_coef_L1"] = np.abs(l1_model.coef_[0])
+
+    # forêt entraînée sur une moitié, importance mesurée sur l'autre moitié
+    X_a, X_b, y_a, y_b = train_test_split(X, y, test_size=0.5, stratify=y, random_state=seed)
+    forest = RandomForestClassifier(n_estimators=200, min_samples_leaf=5, n_jobs=-1, random_state=seed)
+    forest.fit(X_a, y_a)
+    perm = permutation_importance(forest, X_b, y_b, scoring="roc_auc", n_repeats=n_repeats,
+                                  random_state=seed, n_jobs=-1)
+    scores["permutation_RF"] = perm.importances_mean
+
+    criteria = ["anova_F", "info_mutuelle", "abs_coef_L1", "permutation_RF"]
+    for c in criteria:
+        scores["rang_" + c] = scores[c].rank(ascending=False).astype(int)
+    scores["rang_moyen"] = scores[["rang_" + c for c in criteria]].mean(axis=1)
+    return scores.sort_values("rang_moyen")
+
+
+
+def cv_score_vs_k(make_model, X, y, ks, scoring, cv):
+    """Score de validation croisée en fonction du nombre k de variables gardées.
+
+    make_model(k) doit renvoyer un pipeline complet qui garde k variables : la sélection
+    est ainsi refaite dans chaque pli.
+    """
+    rows = []
+    for k in ks:
+        res = cross_validate(make_model(k), X, y, scoring=scoring, cv=cv, n_jobs=-1)
+        rows.append({"k": k, "score_moyen": res["test_score"].mean(), "ecart_type": res["test_score"].std()})
+    return pd.DataFrame(rows)
+
+
+
+def selection_leakage_demo(n_samples=100, n_features=5000, k=50, seed=0):
+    """Montre pourquoi la sélection de variables doit être faite dans la validation croisée.
+
+    Les labels sont tirés au hasard : la vraie accuracy est donc de 50 %.
+    (a) on choisit les k meilleures variables sur tout le jeu, puis on fait la validation croisée ;
+    (b) la sélection est dans le pipeline, donc refaite dans chaque pli.
+    """
+    rng = np.random.default_rng(seed)
+    X = rng.normal(size=(n_samples, n_features))
+    y = rng.integers(0, 2, size=n_samples)
+    cv = make_cv(5, seed)
+    model = LogisticRegression(max_iter=2000)
+
+    X_selected = SelectKBest(f_classif, k=k).fit_transform(X, y)
+    biased = cross_validate(model, X_selected, y, cv=cv, scoring="accuracy")["test_score"].mean()
+
+    pipe = Pipeline([("select", SelectKBest(f_classif, k=k)), ("model", model)])
+    honest = cross_validate(pipe, X, y, cv=cv, scoring="accuracy")["test_score"].mean()
+
+    return pd.Series({"(a) sélection hors CV (biaisé)": biased, "(b) sélection dans le pipeline": honest})
+
+
     
 
 # ------------------------------------------------------------------------
@@ -742,6 +817,73 @@ def plot_confusion(metrics, labels=("0", "1"), normalize=False, ax=None, title="
     ax.set_yticks([0, 1], ["réel " + labels[0], "réel " + labels[1]])
     ax.set_title(title)
     return ax
+
+def plot_roc_pr(scores, y_true, mark_fpr=None, roc_xmax=1.0):
+    """Courbes ROC et précision-rappel de plusieurs modèles ; scores = {nom: scores du modèle}.
+
+    roc_xmax < 1 zoome la courbe ROC sur les faibles taux de faux positifs.
+    """
+    fig, (ax_roc, ax_pr) = plt.subplots(1, 2, figsize=(12, 4.5))
+    for name, s in scores.items():
+        fpr, tpr, _ = roc_curve(y_true, s)
+        ax_roc.plot(fpr, tpr, label=f"{name} (AUC={roc_auc_score(y_true, s):.3f})")
+        precision, recall, _ = precision_recall_curve(y_true, s)
+        ax_pr.plot(recall, precision, label=f"{name} (AP={average_precision_score(y_true, s):.3f})")
+
+    ax_roc.plot([0, 1], [0, 1], "k--", lw=0.8)
+    if mark_fpr is not None:
+        ax_roc.axvline(mark_fpr, color="red", ls=":", lw=1, label=f"TFP = {mark_fpr:.0%}")
+    ax_roc.set_xlim(-0.005 * roc_xmax, roc_xmax)
+    ax_roc.set_xlabel("taux de faux positifs")
+    ax_roc.set_ylabel("taux de vrais positifs (rappel)")
+    ax_roc.set_title("Courbes ROC")
+    ax_roc.legend(fontsize=7)
+
+    base_rate = np.mean(y_true)          # précision d'un classement au hasard
+    ax_pr.axhline(base_rate, color="k", ls="--", lw=0.8, label=f"hasard (= {base_rate:.3f})")
+    ax_pr.set_xlabel("rappel")
+    ax_pr.set_ylabel("précision")
+    ax_pr.set_title("Courbes Précision-Rappel")
+    ax_pr.legend(fontsize=7)
+    return ax_roc, ax_pr
+
+
+def plot_validation_curve(model, X, y, param_name, param_range, scoring, cv, log_x=False, ax=None):
+    """Scores d'entraînement et de validation selon un hyperparamètre (biais / variance)."""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(6, 3.5))
+    train, valid = validation_curve(model, X, y, param_name=param_name, param_range=param_range,
+                                    scoring=scoring, cv=cv, n_jobs=-1)
+    for s, label in [(train, "entraînement"), (valid, "validation")]:
+        mean, std = s.mean(axis=1), s.std(axis=1)
+        ax.plot(param_range, mean, "o-", ms=3, label=label)
+        ax.fill_between(param_range, mean - std, mean + std, alpha=0.2)
+    if log_x:
+        ax.set_xscale("log")
+    ax.set_xlabel(param_name)
+    ax.set_ylabel(scoring)
+    ax.legend()
+    ax.grid(alpha=0.3)
+    return ax
+
+
+def plot_learning_curve(model, X, y, scoring, cv, ax=None, title=""):
+    """Scores d'entraînement et de validation selon la taille du train : plus de données aideraient-elles ?"""
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(6, 3.5))
+    sizes, train, valid = learning_curve(model, X, y, train_sizes=np.linspace(0.1, 1.0, 6),
+                                         scoring=scoring, cv=cv, n_jobs=-1)
+    for s, label in [(train, "entraînement"), (valid, "validation")]:
+        mean, std = s.mean(axis=1), s.std(axis=1)
+        ax.plot(sizes, mean, "o-", ms=3, label=label)
+        ax.fill_between(sizes, mean - std, mean + std, alpha=0.2)
+    ax.set_xlabel("taille du jeu d'entraînement")
+    ax.set_ylabel(scoring)
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(alpha=0.3)
+    return ax
+
 
 
 def plot_feature_ranking(ranking, top=20, ax=None):
