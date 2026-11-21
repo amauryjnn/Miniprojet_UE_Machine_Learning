@@ -65,7 +65,8 @@ All random seeds are fixed, so the results are reproducible.
 | 1. Import | `load_spambase` (reads column names from `spambase.names`), `load_diabetes`, `describe_dataset` (shape, missing values, duplicates, class balance), `variable_types` |
 | 2. Pre-processing | `remove_duplicates`, median imputation, `log1p` transform, `StandardScalerManual`, `PCAManual`, all assembled by `build_pipeline` |
 | 3. Split | `split_data` (stratified 80/20), `make_cv` (stratified k-fold cross-validation) |
-| 4. Training and feature selection | `get_models` (11 classifiers), `tune_model` (grid or randomized search), `rank_features` (ANOVA F-test, mutual information, L1 penalty, permutation importance), `cv_score_vs_k`; selectors (`SelectKBest`, L1 `SelectFromModel`, `RFECV`) plugged into the pipeline |
+| 4. Training and feature selection | `get_models` (11 classifi
+ers), `tune_model` (grid or randomized search), `rank_features` (ANOVA F-test, mutual information, L1 penalty, permutation importance), `cv_score_vs_k`; selectors (`SelectKBest`, L1 `SelectFromModel`, `RFECV`) plugged into the pipeline |
 | 5. Validation | metrics computed from the confusion matrix (`confusion_counts`, `compute_metrics`), `cross_validate_models`, decision-threshold selection on out-of-fold scores (`neyman_pearson_threshold`, `bayes_risk_threshold`, `fbeta_threshold`), `evaluate_on_test`, `plot_*` helpers |
 
 **No information from the test set is ever used for training.** Imputation, scaling, PCA, feature selection and
@@ -118,6 +119,7 @@ conclusion and the limits of the study.
 
 Amaury : AI used for debugging and for the tests on the functions as well as their description. The README was also made using AI since I don't know the formatting well, however the structure and arguments were made my me.
 
+Anthony: AI was used as a support tool to clarify some theoretical concepts of the course before implementing them, for debugging and for writing tests on some functions, and to help with the wording of the documentation and comments.
 
 ## Data sources
 
