@@ -87,3 +87,42 @@ cross-validation yields 92% accuracy on purely random labels, against 51% when s
 
 The other models (k-NN, SVM, decision tree, random forest, gradient boosting, MLP), the feature-selection filters and
 the resampling methods (`imbalanced-learn`) come from libraries.
+
+
+## Main results
+
+| | Spambase | Diabetes |
+|---|---|---|
+| Cost of errors | a false positive hides a legitimate e-mail: very costly | a false negative is an undetected diabetes; a false positive is an unnecessary blood test |
+| Model comparison (threshold-free) | ROC AUC, and recall at a 1% false-positive rate | PR AUC (average precision), plus ROC AUC |
+| Decision threshold | Neyman-Pearson: maximise recall with a false-positive rate ≤ 1% | maximise F2 (recall counts twice as much as precision) |
+| **Selected model** | **Random Forest, 57 features, Neyman-Pearson threshold = 0.76** | **Gradient Boosting, 21 features, F2 threshold = 0.118** |
+| Test set | ROC AUC 0.989; **0.4% false positives**; 81% of spam detected; precision 99.3% | PR AUC 0.42 (0.14 at random); ROC AUC 0.83; **83% of diabetics detected**; precision 29% |
+
+In both cases **the decision threshold matters as much as the model**. On Spambase, the Neyman-Pearson threshold cuts
+false positives from 17 to 2 legitimate e-mails out of 506; on Diabetes, lowering the threshold raises recall from 16%
+to 83%.
+
+<p align="center">
+  <img src="figures/spam_confusion_seuils.png" width="45%" alt="Spambase: confusion matrices at threshold 0.5 and at the Neyman-Pearson threshold">
+  <img src="figures/diabetes_confusion_seuils.png" width="53%" alt="Diabetes: confusion matrices for three thresholds">
+</p>
+
+The same workflow leads to similar conclusions on both datasets: tree ensembles are the best models, PCA and feature
+selection do not improve the score, and the hand-written LDA stays close to logistic regression. The datasets differ
+in how separable they are (ROC AUC 0.99 against 0.83) and in the direction of the threshold: it is raised on Spambase
+to avoid false positives and lowered on Diabetes to detect rare positives. Each notebook ends with a detailed
+conclusion and the limits of the study.
+
+## Use of AI
+
+Amaury : AI used for debugging and for the tests on the functions as well as their description. The README was also made using AI since I don't know the formatting well, however the structure and arguments were made my me.
+
+
+## Data sources
+
+- **Spambase**: M. Hopkins, E. Reeber, G. Forman and J. Suermondt (1999),
+  [UCI Machine Learning Repository](https://archive.ics.uci.edu/dataset/94/spambase), CC BY 4.0 licence.
+- **Diabetes Health Indicators**: A. Teboul,
+  [Kaggle](https://www.kaggle.com/datasets/alexteboul/diabetes-health-indicators-dataset), a cleaned version of the
+  CDC's 2015 Behavioral Risk Factor Surveillance System (BRFSS) survey; see the Kaggle page for terms of use.
