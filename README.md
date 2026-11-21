@@ -4,7 +4,7 @@
 
 Course project for the Machine Learning unit of the TAF MCE (Mathematical and Computational Engineering),
 IMT Atlantique, 2026.
-**Authors**: Amaury JANIN, Anthony DERKEVORKIAN, Lucas OZEL.
+**Authors**: Amaury JANIN, Anthony DER KEVORKIAN, Lucas OZEL.
 
 ## Project brief
 
