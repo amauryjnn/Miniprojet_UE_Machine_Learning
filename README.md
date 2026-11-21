@@ -4,13 +4,11 @@
 
 Course project for the Machine Learning unit of the TAF MCE (Mathematical and Computational Engineering),
 IMT Atlantique, 2026.
-**Authors**: Amaury JANIN, Anthony DERKEVORKIAN, Lucas OZEL.
+**Authors**: Amaury JANIN, Anthony DER KEVORKIAN, Lucas OZEL.
 
 ## Project brief
 
-The goal is to build **one machine learning workflow** and apply it, unchanged, to **two binary classification
-datasets**, while following good software engineering practices: version control with Git, collaborative
-development and reproducible code.
+The goal is to build **one machine learning workflow** and apply it, unchanged, to **two binary classification datasets**, while following good software engineering practices: version control with Git, collaborative development and reproducible code.
 
 ### Datasets
 
@@ -99,8 +97,7 @@ the resampling methods (`imbalanced-learn`) come from libraries.
 | **Selected model** | **Random Forest, 57 features, Neyman-Pearson threshold = 0.76** | **Gradient Boosting, 21 features, F2 threshold = 0.118** |
 | Test set | ROC AUC 0.989; **0.4% false positives**; 81% of spam detected; precision 99.3% | PR AUC 0.42 (0.14 at random); ROC AUC 0.83; **83% of diabetics detected**; precision 29% |
 
-In both cases **the decision threshold matters as much as the model**. On Spambase, the Neyman-Pearson threshold cuts
-false positives from 17 to 2 legitimate e-mails out of 506; on Diabetes, lowering the threshold raises recall from 16%
+In both cases **the decision threshold matters as much as the model**. On Spambase, the Neyman-Pearson threshold cuts false positives from 17 to 2 legitimate e-mails out of 506; on Diabetes, lowering the threshold raises recall from 16%
 to 83%.
 
 <p align="center">
@@ -108,15 +105,15 @@ to 83%.
   <img src="figures/diabetes_confusion_seuils.png" width="53%" alt="Diabetes: confusion matrices for three thresholds">
 </p>
 
-The same workflow leads to similar conclusions on both datasets: tree ensembles are the best models, PCA and feature
-selection do not improve the score, and the hand-written LDA stays close to logistic regression. The datasets differ
-in how separable they are (ROC AUC 0.99 against 0.83) and in the direction of the threshold: it is raised on Spambase
-to avoid false positives and lowered on Diabetes to detect rare positives. Each notebook ends with a detailed
+The same workflow leads to similar conclusions on both datasets: tree ensembles are the best models, PCA and feature selection do not improve the score, and the hand-written LDA stays close to logistic regression. The datasets differ in how separable they are (ROC AUC 0.99 against 0.83) and in the direction of the threshold: it is raised on Spambase to avoid false positives and lowered on Diabetes to detect rare positives. Each notebook ends with a detailed
 conclusion and the limits of the study.
 
 ## Use of AI
 
 Amaury : AI used for debugging and for the tests on the functions as well as their description. The README was also made using AI since I don't know the formatting well, however the structure and arguments were made my me.
+
+
+Anthony: AI was used as a support tool to clarify some theoretical concepts of the course before implementing them, for debugging and for writing tests on some functions, and to help with the wording of the documentation and comments.
 
 
 ## Data sources

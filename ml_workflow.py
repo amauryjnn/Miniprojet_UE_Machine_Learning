@@ -385,7 +385,6 @@ class LogisticRegressionGD(ClassifierMixin, BaseEstimator):
         return self.classes_[(self.decision_function(X) > 0).astype(int)]
 
 
-# 4b. CATALOGUE DE MODÈLES, VALIDATION CROISÉE, RÉGLAGE  
 def get_models(seed=42, class_weight=None):
     """Classifieurs comparés, avec des hyperparamètres de départ raisonnables.
 
@@ -393,9 +392,9 @@ def get_models(seed=42, class_weight=None):
     """
     models = {
         "Dummy (classe majoritaire)": DummyClassifier(strategy="most_frequent"),
-        "Régression logistique": LogisticRegressionGD(C=1.0, class_weight=class_weight),
-        "LDA": GaussianBayesClassifier(covariance="shared", reg=1e-3),
-        "QDA": GaussianBayesClassifier(covariance="full", reg=1e-1),
+        "Régression logistique (GD, à la main)": LogisticRegressionGD(C=1.0, class_weight=class_weight),
+        "LDA (à la main)": GaussianBayesClassifier(covariance="shared", reg=1e-3),
+        "QDA (à la main)": GaussianBayesClassifier(covariance="full", reg=1e-1),
         "Bayes naïf gaussien": GaussianNB(),
         "kNN": KNeighborsClassifier(n_neighbors=15, weights="distance"),
         "SVM RBF": SVC(C=1.0, gamma="scale", class_weight=class_weight, random_state=seed),
